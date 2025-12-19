@@ -67,34 +67,15 @@ class TelegramChannel
                     ]);
 
                     if ($linkedUser) {
-                        $linkedUser->telegram_id = $telegramId;
-                        $linkedUser->save();
-
-                        Log::info('Telegram account linked', [
-                            'user_id' => $linkedUser->id,
-                            'telegram_id' => $telegramId,
-                            'email' => $linkedUser->email,
-                        ]);
-
-                        $user = $linkedUser;
-
-                        // Ambil daftar kategori global yang tersedia
-                        $categories = Category::whereNull('user_id')
-                            ->orderBy('name')
-                            ->pluck('name')
-                            ->all();
-
-                        $categoryLine = '';
-                        if (! empty($categories)) {
-                            $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+                        // Handle konflik: cek apakah user sudah punya telegram_id atau telegram_id sudah dipakai
+                        $linkResult = $this->handleTelegramLinking($linkedUser, $telegramId, $chatId);
+                        
+                        if ($linkResult) {
+                            // Jika berhasil link, return response
+                            $user = $linkedUser;
+                            return $linkResult;
                         }
-
-                        // Kirim pesan konfirmasi linking berhasil tanpa masuk ke MessageProcessor.
-                        return [
-                            'method'  => 'sendMessage',
-                            'chat_id' => $chatId,
-                            'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
-                        ];
+                        // Jika gagal (konflik), lanjut ke fallback atau error message
                     } else {
                         Log::warning('Telegram linking failed: User not found', [
                             'user_id' => $userId,
@@ -109,32 +90,15 @@ class TelegramChannel
                         $linkedUser = User::find($userId);
                         
                         if ($linkedUser) {
-                            $linkedUser->telegram_id = $telegramId;
-                            $linkedUser->save();
+                            // Handle konflik: cek apakah user sudah punya telegram_id atau telegram_id sudah dipakai
+                            $linkResult = $this->handleTelegramLinking($linkedUser, $telegramId, $chatId);
                             
-                            Log::info('Telegram account linked (without decode)', [
-                                'user_id' => $linkedUser->id,
-                                'telegram_id' => $telegramId,
-                                'email' => $linkedUser->email,
-                            ]);
-                            
-                            $user = $linkedUser;
-                            
-                            $categories = Category::whereNull('user_id')
-                                ->orderBy('name')
-                                ->pluck('name')
-                                ->all();
-                            
-                            $categoryLine = '';
-                            if (! empty($categories)) {
-                                $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+                            if ($linkResult) {
+                                // Jika berhasil link, return response
+                                $user = $linkedUser;
+                                return $linkResult;
                             }
-                            
-                            return [
-                                'method'  => 'sendMessage',
-                                'chat_id' => $chatId,
-                                'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
-                            ];
+                            // Jika gagal (konflik), lanjut ke fallback atau error message
                         }
                     } catch (\Throwable $e2) {
                         // Jika token invalid atau gagal didekripsi, lanjut ke fallback di bawah.
@@ -155,33 +119,15 @@ class TelegramChannel
                     ->first();
 
                 if ($recentUser) {
-                    $recentUser->telegram_id = $telegramId;
-                    $recentUser->save();
-
-                    Log::info('Telegram account auto-linked (fallback)', [
-                        'user_id' => $recentUser->id,
-                        'telegram_id' => $telegramId,
-                        'email' => $recentUser->email,
-                    ]);
-
-                    $user = $recentUser;
-
-                    // Ambil daftar kategori global yang tersedia
-                    $categories = Category::whereNull('user_id')
-                        ->orderBy('name')
-                        ->pluck('name')
-                        ->all();
-
-                    $categoryLine = '';
-                    if (! empty($categories)) {
-                        $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+                    // Handle konflik: cek apakah telegram_id sudah dipakai user lain
+                    $linkResult = $this->handleTelegramLinking($recentUser, $telegramId, $chatId);
+                    
+                    if ($linkResult) {
+                        // Jika berhasil link, return response
+                        $user = $recentUser;
+                        return $linkResult;
                     }
-
-                    return [
-                        'method'  => 'sendMessage',
-                        'chat_id' => $chatId,
-                        'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
-                    ];
+                    // Jika gagal (konflik), lanjut ke log
                 }
 
                 Log::info('Telegram /start tanpa token dan tidak ada user baru', [
@@ -200,6 +146,16 @@ class TelegramChannel
                     'password' => bcrypt('secret'), // placeholder, tidak dipakai login biasa
                 ]
             );
+            
+            // Pastikan telegram_id di-set untuk pseudo-user
+            if ($telegramId !== '' && $user->telegram_id !== $telegramId) {
+                // Cek dulu apakah telegram_id sudah dipakai user lain
+                $existingUser = User::where('telegram_id', $telegramId)->first();
+                if (! $existingUser) {
+                    $user->telegram_id = $telegramId;
+                    $user->save();
+                }
+            }
         }
 
         $context = [
@@ -224,6 +180,105 @@ class TelegramChannel
             'method' => 'sendMessage',
             'chat_id' => $context['chat_id'],
             'text' => 'Pesan kamu sudah diproses 👍',
+        ];
+    }
+
+    /**
+     * Handle linking telegram_id ke user dengan validasi konflik.
+     *
+     * @param User $user User yang akan di-link
+     * @param string $telegramId Telegram ID yang akan di-link
+     * @param mixed $chatId Chat ID untuk response
+     * @return array|null Response array jika berhasil, null jika ada konflik
+     */
+    protected function handleTelegramLinking(User $user, string $telegramId, $chatId): ?array
+    {
+        // Skenario 1: User sudah punya telegram_id yang sama -> sudah terhubung
+        if ($user->telegram_id === $telegramId) {
+            Log::info('Telegram account already linked to same user', [
+                'user_id' => $user->id,
+                'telegram_id' => $telegramId,
+                'email' => $user->email,
+            ]);
+
+            $categories = Category::whereNull('user_id')
+                ->orderBy('name')
+                ->pluck('name')
+                ->all();
+
+            $categoryLine = '';
+            if (! empty($categories)) {
+                $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+            }
+
+            return [
+                'method'  => 'sendMessage',
+                'chat_id' => $chatId,
+                'text'    => 'Akun Telegram kamu sudah terhubung dengan akun ini. Kamu bisa langsung kirim catatan keuangan di sini.' . $categoryLine,
+            ];
+        }
+
+        // Skenario 2: User sudah punya telegram_id yang berbeda -> konflik!
+        if ($user->telegram_id !== null && $user->telegram_id !== $telegramId) {
+            Log::warning('Telegram linking conflict: User already has different telegram_id', [
+                'user_id' => $user->id,
+                'existing_telegram_id' => $user->telegram_id,
+                'new_telegram_id' => $telegramId,
+                'email' => $user->email,
+            ]);
+
+            return [
+                'method'  => 'sendMessage',
+                'chat_id' => $chatId,
+                'text'    => 'Akun email ' . $user->email . ' sudah terhubung dengan Telegram ID lain. Silakan hubungi admin untuk memutuskan koneksi yang lama terlebih dahulu.',
+            ];
+        }
+
+        // Skenario 3: Telegram ID sudah dipakai user lain -> konflik!
+        $existingUser = User::where('telegram_id', $telegramId)
+            ->where('id', '!=', $user->id)
+            ->first();
+
+        if ($existingUser) {
+            Log::warning('Telegram linking conflict: Telegram ID already used by another user', [
+                'target_user_id' => $user->id,
+                'target_email' => $user->email,
+                'existing_user_id' => $existingUser->id,
+                'existing_email' => $existingUser->email,
+                'telegram_id' => $telegramId,
+            ]);
+
+            return [
+                'method'  => 'sendMessage',
+                'chat_id' => $chatId,
+                'text'    => 'Telegram ID ini sudah terhubung dengan akun lain (' . $existingUser->email . '). Jika ini akun kamu, silakan hubungi admin untuk memutuskan koneksi yang lama terlebih dahulu.',
+            ];
+        }
+
+        // Skenario 4: Semua aman, bisa link
+        $user->telegram_id = $telegramId;
+        $user->save();
+
+        Log::info('Telegram account linked successfully', [
+            'user_id' => $user->id,
+            'telegram_id' => $telegramId,
+            'email' => $user->email,
+        ]);
+
+        $categories = Category::whereNull('user_id')
+            ->orderBy('name')
+            ->pluck('name')
+            ->all();
+
+        $categoryLine = '';
+        if (! empty($categories)) {
+            $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+        }
+
+        return [
+            'method'  => 'sendMessage',
+            'chat_id' => $chatId,
+            'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
         ];
     }
 }
