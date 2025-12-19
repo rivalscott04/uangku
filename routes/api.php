@@ -21,4 +21,9 @@ Route::post('/receipts/parse', [ReceiptController::class, 'parse'])
 Route::post('/receipts/confirm', [ReceiptController::class, 'confirm'])
     ->name('api.receipts.confirm');
 
+// Webhook Telegram (MVP) - di api.php agar tidak pakai CSRF
+// Note: URL akan jadi /api/webhook/telegram, perlu update webhook URL di Telegram
+Route::post('/webhook/telegram', \App\Http\Controllers\TelegramWebhookController::class)
+    ->name('webhook.telegram');
+
 
