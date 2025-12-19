@@ -101,7 +101,7 @@ HTML;
         ->with('status', 'Terima kasih! Akun kamu sudah aktif, kamu bisa mulai mencoba Uangku selama 7 hari.');
 })->name('register');
 
-// Webhook Telegram (MVP)
+// Webhook Telegram (MVP) - exclude dari CSRF di bootstrap/app.php
 Route::post('/webhook/telegram', \App\Http\Controllers\TelegramWebhookController::class)
     ->name('webhook.telegram');
 
