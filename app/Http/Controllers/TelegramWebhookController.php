@@ -7,6 +7,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class TelegramWebhookController extends Controller
 {
@@ -24,18 +25,38 @@ class TelegramWebhookController extends Controller
     {
         $update = $request->all();
 
-        $responsePayload = $this->telegramChannel->handleIncoming($update);
+        // Log incoming webhook untuk debugging
+        Log::debug('Telegram webhook received', [
+            'update_id' => $update['update_id'] ?? null,
+            'message_text' => $update['message']['text'] ?? null,
+            'from_id' => $update['message']['from']['id'] ?? null,
+        ]);
 
-        // Ambil konfigurasi bot Telegram dari config/services.php
-        $botToken = (string) Config::get('services.telegram.bot_token');
-        $apiBase = rtrim((string) Config::get('services.telegram.api_url', 'https://api.telegram.org'), '/');
+        try {
+            $responsePayload = $this->telegramChannel->handleIncoming($update);
 
-        if ($botToken !== '' && ($responsePayload['method'] ?? null) === 'sendMessage') {
-            // Kirim balasan ke Telegram menggunakan API resmi.
-            // Untuk MVP, kita abaikan error handling detail dan hanya log di masa depan jika perlu.
-            Http::post("{$apiBase}/bot{$botToken}/sendMessage", [
-                'chat_id' => $responsePayload['chat_id'] ?? null,
-                'text'    => $responsePayload['text'] ?? '',
+            // Ambil konfigurasi bot Telegram dari config/services.php
+            $botToken = (string) Config::get('services.telegram.bot_token');
+            $apiBase = rtrim((string) Config::get('services.telegram.api_url', 'https://api.telegram.org'), '/');
+
+            if ($botToken !== '' && ($responsePayload['method'] ?? null) === 'sendMessage') {
+                // Kirim balasan ke Telegram menggunakan API resmi.
+                $response = Http::post("{$apiBase}/bot{$botToken}/sendMessage", [
+                    'chat_id' => $responsePayload['chat_id'] ?? null,
+                    'text'    => $responsePayload['text'] ?? '',
+                ]);
+
+                if (! $response->successful()) {
+                    Log::error('Failed to send Telegram message', [
+                        'status' => $response->status(),
+                        'body' => $response->body(),
+                    ]);
+                }
+            }
+        } catch (\Throwable $e) {
+            Log::error('Telegram webhook error', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
             ]);
         }
 

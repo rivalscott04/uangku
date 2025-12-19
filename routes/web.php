@@ -86,7 +86,7 @@ Route::post('/register', function (Request $request) {
             Buka Telegram sekarang
         </a>
         <div class="small">
-            Jika tidak otomatis terbuka, pastikan aplikasi Telegram sudah terpasang lalu coba klik lagi.
+            <strong>Tips:</strong> Setelah bot terbuka, tekan tombol Start. Jika tidak otomatis terhubung, kirim pesan <code>/start</code> ke bot dalam 1 menit ke depan untuk auto-link.
         </div>
     </div>
 </body>

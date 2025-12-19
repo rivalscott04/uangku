@@ -6,6 +6,7 @@ use App\Core\MessageProcessor;
 use App\Models\Category;
 use App\Models\User;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 /**
@@ -61,6 +62,12 @@ class TelegramChannel
                         $linkedUser->telegram_id = $telegramId;
                         $linkedUser->save();
 
+                        Log::info('Telegram account linked', [
+                            'user_id' => $linkedUser->id,
+                            'telegram_id' => $telegramId,
+                            'email' => $linkedUser->email,
+                        ]);
+
                         $user = $linkedUser;
 
                         // Ambil daftar kategori global yang tersedia
@@ -80,10 +87,63 @@ class TelegramChannel
                             'chat_id' => $chatId,
                             'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
                         ];
+                    } else {
+                        Log::warning('Telegram linking failed: User not found', [
+                            'user_id' => $userId,
+                            'telegram_id' => $telegramId,
+                            'token' => substr($token, 0, 10) . '...',
+                        ]);
                     }
                 } catch (\Throwable $e) {
                     // Jika token invalid atau gagal didekripsi, lanjut ke fallback di bawah.
+                    Log::error('Telegram linking failed: Token decrypt error', [
+                        'error' => $e->getMessage(),
+                        'telegram_id' => $telegramId,
+                        'token_preview' => $token ? substr($token, 0, 10) . '...' : 'null',
+                    ]);
                 }
+            } else {
+                // Fallback: kalau /start tanpa token, coba auto-link ke user yang baru daftar
+                // (dalam 1 menit terakhir) yang belum punya telegram_id
+                $recentUser = User::whereNull('telegram_id')
+                    ->where('created_at', '>=', now()->subMinute())
+                    ->orderBy('created_at', 'desc')
+                    ->first();
+
+                if ($recentUser) {
+                    $recentUser->telegram_id = $telegramId;
+                    $recentUser->save();
+
+                    Log::info('Telegram account auto-linked (fallback)', [
+                        'user_id' => $recentUser->id,
+                        'telegram_id' => $telegramId,
+                        'email' => $recentUser->email,
+                    ]);
+
+                    $user = $recentUser;
+
+                    // Ambil daftar kategori global yang tersedia
+                    $categories = Category::whereNull('user_id')
+                        ->orderBy('name')
+                        ->pluck('name')
+                        ->all();
+
+                    $categoryLine = '';
+                    if (! empty($categories)) {
+                        $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+                    }
+
+                    return [
+                        'method'  => 'sendMessage',
+                        'chat_id' => $chatId,
+                        'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
+                    ];
+                }
+
+                Log::info('Telegram /start tanpa token dan tidak ada user baru', [
+                    'telegram_id' => $telegramId,
+                    'text' => $text,
+                ]);
             }
         }
 
