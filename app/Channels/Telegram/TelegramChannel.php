@@ -55,8 +55,16 @@ class TelegramChannel
 
             if ($token) {
                 try {
-                    $userId = Crypt::decryptString($token);
+                    // Token mungkin ter-encode di URL, coba decode dulu
+                    $decodedToken = urldecode($token);
+                    $userId = Crypt::decryptString($decodedToken);
                     $linkedUser = User::find($userId);
+                    
+                    Log::debug('Telegram token processing', [
+                        'token_raw' => substr($token, 0, 20) . '...',
+                        'token_decoded' => substr($decodedToken, 0, 20) . '...',
+                        'user_id_decrypted' => $userId,
+                    ]);
 
                     if ($linkedUser) {
                         $linkedUser->telegram_id = $telegramId;
@@ -95,18 +103,54 @@ class TelegramChannel
                         ]);
                     }
                 } catch (\Throwable $e) {
-                    // Jika token invalid atau gagal didekripsi, lanjut ke fallback di bawah.
-                    Log::error('Telegram linking failed: Token decrypt error', [
-                        'error' => $e->getMessage(),
-                        'telegram_id' => $telegramId,
-                        'token_preview' => $token ? substr($token, 0, 10) . '...' : 'null',
-                    ]);
+                    // Jika token invalid atau gagal didekripsi, coba tanpa decode
+                    try {
+                        $userId = Crypt::decryptString($token);
+                        $linkedUser = User::find($userId);
+                        
+                        if ($linkedUser) {
+                            $linkedUser->telegram_id = $telegramId;
+                            $linkedUser->save();
+                            
+                            Log::info('Telegram account linked (without decode)', [
+                                'user_id' => $linkedUser->id,
+                                'telegram_id' => $telegramId,
+                                'email' => $linkedUser->email,
+                            ]);
+                            
+                            $user = $linkedUser;
+                            
+                            $categories = Category::whereNull('user_id')
+                                ->orderBy('name')
+                                ->pluck('name')
+                                ->all();
+                            
+                            $categoryLine = '';
+                            if (! empty($categories)) {
+                                $categoryLine = "\n\nDi sistem sudah ada beberapa kategori bawaan:\n- " . implode("\n- ", $categories);
+                            }
+                            
+                            return [
+                                'method'  => 'sendMessage',
+                                'chat_id' => $chatId,
+                                'text'    => 'Akun Telegram kamu sudah terhubung dengan Uangku. Sekarang kamu bisa kirim catatan keuangan di sini.' . $categoryLine,
+                            ];
+                        }
+                    } catch (\Throwable $e2) {
+                        // Jika token invalid atau gagal didekripsi, lanjut ke fallback di bawah.
+                        Log::error('Telegram linking failed: Token decrypt error (both methods)', [
+                            'error1' => $e->getMessage(),
+                            'error2' => $e2->getMessage(),
+                            'telegram_id' => $telegramId,
+                            'token_preview' => $token ? substr($token, 0, 20) . '...' : 'null',
+                        ]);
+                    }
                 }
             } else {
                 // Fallback: kalau /start tanpa token, coba auto-link ke user yang baru daftar
-                // (dalam 1 menit terakhir) yang belum punya telegram_id
+                // (dalam 10 menit terakhir) yang belum punya telegram_id
                 $recentUser = User::whereNull('telegram_id')
-                    ->where('created_at', '>=', now()->subMinute())
+                    ->where('created_at', '>=', now()->subMinutes(10))
                     ->orderBy('created_at', 'desc')
                     ->first();
 
